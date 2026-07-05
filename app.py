@@ -1,150 +1,123 @@
 import streamlit as st
-import requests
 import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
 
+# ==========================================
 # ページ設定
-st.set_page_config(page_title="e-Stat データ自動収集アプリ", layout="wide")
-st.title("📊 e-Stat データ自動収集・成形アプリ")
+# ==========================================
+st.set_page_config(page_title="減塩推進・健康寿命ダッシュボード", layout="wide", page_icon="🧂")
 
 # ==========================================
-# 準備: シークレットからAPP_IDを取得
+# データ準備 (第1弾用デモデータ)
+# ※将来的には e-Stat API から自動取得したデータに差し替えます
 # ==========================================
-try:
-    APP_ID = st.secrets["ESTAT_APP_ID"]
-except KeyError:
-    st.error("【エラー】StreamlitのSecretsに `ESTAT_APP_ID` が設定されていません。")
-    st.stop()
+@st.cache_data
+def load_demo_data():
+    data = {
+        '地域名': ['札幌市', '仙台市', 'さいたま市', '千葉市', '横浜市', '川崎市', '名古屋市', '京都市', '大阪市', '堺市', '神戸市', '広島市', '福岡市', '北九州市'],
+        '平均食塩摂取量_g': [10.5, 10.8, 9.6, 9.7, 9.3, 9.4, 9.8, 9.2, 9.7, 9.9, 9.4, 10.1, 9.6, 10.3],
+        '健康寿命_年': [71.5, 71.2, 72.5, 72.4, 73.1, 72.8, 72.0, 73.2, 72.2, 71.8, 72.9, 71.6, 72.4, 71.4],
+        '循環器疾患死亡率_10万対': [85.2, 88.1, 68.5, 69.2, 62.5, 64.1, 73.2, 61.8, 74.5, 76.0, 63.2, 81.0, 69.1, 84.5],
+        '年間医療介護費_億円': [450, 380, 410, 390, 850, 420, 780, 460, 920, 280, 440, 390, 520, 350]
+    }
+    return pd.DataFrame(data)
+
+df = load_demo_data()
 
 # ==========================================
-# 関数定義
+# アプリのUIとメイン処理
 # ==========================================
-@st.cache_data(ttl=3600)
-def search_stats_id(keyword):
-    """キーワードから統計表情報を検索する"""
-    url = "http://api.e-stat.go.jp/rest/3.0/app/json/getStatsList"
-    params = {"appId": APP_ID, "searchWord": keyword, "limit": 30}
-    response = requests.get(url, params=params).json()
+st.title("🧂 減塩推進による健康寿命延伸ダッシュボード")
+st.markdown("市民の「食塩摂取量」と「循環器疾患リスク」「健康寿命」の相関を可視化し、政策効果をシミュレーションします。")
+
+# タブで画面を分割
+tab1, tab2, tab3 = st.tabs(["📊 現状分析 (マクロ)", "🎯 減塩政策シミュレーター", "📋 データテーブル"])
+
+# ------------------------------------------
+# タブ1: 現状分析
+# ------------------------------------------
+with tab1:
+    st.subheader("地域別の食塩摂取量と健康寿命の相関")
+    st.markdown("塩分摂取量が多い都市ほど、健康寿命が短く、循環器疾患による死亡率（円の大きさ）が高い傾向が見られます。")
     
-    try:
-        datalist = response['GET_STATS_LIST']['DATALIST_INF']['TABLE_INF']
-        if isinstance(datalist, dict): 
-            datalist = [datalist]
-        return datalist
-    except KeyError:
-        return []
-
-def fetch_and_format_estat(stats_data_id):
-    """e-Stat APIからデータを取得し、綺麗なDataFrameに変換する"""
-    url = "http://api.e-stat.go.jp/rest/3.0/app/json/getStatsData"
-    params = {"appId": APP_ID, "statsDataId": stats_data_id, "metaGetFlg": "Y"}
-    response = requests.get(url, params=params).json()
+    # Plotlyによるバブルチャート
+    fig_scatter = px.scatter(
+        df, 
+        x="平均食塩摂取量_g", 
+        y="健康寿命_年", 
+        text="地域名", 
+        size="循環器疾患死亡率_10万対", 
+        color="循環器疾患死亡率_10万対",
+        color_continuous_scale=px.colors.sequential.OrRd,
+        labels={"平均食塩摂取量_g": "1日あたり平均食塩摂取量 (g)", "健康寿命_年": "健康寿命 (年)"},
+        height=600
+    )
+    fig_scatter.update_traces(textposition='top center', marker=dict(opacity=0.8, line=dict(width=1, color='DarkSlateGrey')))
     
-    if response['GET_STATS_DATA']['RESULT']['STATUS'] != 0:
-        st.error(f"APIエラー: {response['GET_STATS_DATA']['RESULT']['ERROR_MSG']}")
-        return None
-
-    try:
-        # メタデータ（コード表）の辞書化
-        class_obj = response['GET_STATS_DATA']['STATISTICAL_DATA']['CLASS_INF']['CLASS_OBJ']
-        meta_dict = {}
-        for obj in class_obj:
-            category_id = obj['@id']
-            meta_dict[category_id] = {'name': obj.get('@name', category_id), 'codes': {}}
-            classes = obj.get('CLASS', [])
-            if isinstance(classes, dict): classes = [classes]
-            for cls in classes:
-                meta_dict[category_id]['codes'][cls['@code']] = cls['@name']
-
-        # 実データの抽出とパース
-        values = response['GET_STATS_DATA']['STATISTICAL_DATA']['DATA_INF']['VALUE']
-        parsed_data = []
-        for val in values:
-            row = {'値': val.get('$', ''), '単位': val.get('@unit', '')}
-            for key, code in val.items():
-                if key.startswith('@') and key not in ['@unit', '@tab']:
-                    cat_id = key[1:]
-                    if cat_id in meta_dict:
-                        col_name = meta_dict[cat_id]['name']
-                        row[col_name] = meta_dict[cat_id]['codes'].get(code, code)
-            parsed_data.append(row)
-        return pd.DataFrame(parsed_data)
-    except Exception as e:
-        st.error(f"データのパース中にエラーが発生しました: {e}")
-        return None
-
-# ==========================================
-# UI と アプリのメイン処理
-# ==========================================
-
-# セッションステートの初期化
-if "search_results" not in st.session_state:
-    st.session_state["search_results"] = []
-
-st.markdown("### 1. キーワード検索")
-col1, col2 = st.columns([3, 1])
-with col1:
-    keyword = st.text_input("検索キーワードを入力", placeholder="例: 医療施設調査 病床数")
-with col2:
-    st.write("") # 位置合わせ用
-    st.write("")
-    if st.button("🔍 検索する", use_container_width=True):
-        if keyword:
-            with st.spinner("検索中..."):
-                st.session_state["search_results"] = search_stats_id(keyword)
-                if not st.session_state["search_results"]:
-                    st.warning("データが見つかりませんでした。別のキーワードをお試しください。")
-        else:
-            st.warning("キーワードを入力してください。")
-
-st.divider()
-
-# 検索結果がある場合のみプルダウンを表示
-if st.session_state["search_results"]:
-    st.markdown("### 2. 統計表の選択とダウンロード")
+    # 国の目標値（成人男性7.5g未満など）の参照線を引く
+    fig_scatter.add_vline(x=7.5, line_dash="dash", line_color="green", annotation_text="国の目標値(男性 7.5g)", annotation_position="top left")
     
-    # プルダウン用の選択肢を作成（表示用テキスト : 統計表ID）
-    options = {}
-    for item in st.session_state["search_results"]:
-        stats_id = item['@id']
-        stat_name = item.get('STAT_NAME', {}).get('$', '名称不明')
-        title = item.get('TITLE', {}).get('$', 'タイトル不明')
-        display_text = f"【{stats_id}】 {stat_name} - {title}"
-        options[display_text] = stats_id
+    st.plotly_chart(fig_scatter, use_container_width=True)
 
-    selected_display = st.selectbox("取得したい統計表を選んでください:", list(options.keys()))
-    selected_id = options[selected_display]
+# ------------------------------------------
+# タブ2: シミュレーター
+# ------------------------------------------
+with tab2:
+    st.subheader("行政介入による減塩効果シミュレーション")
+    
+    # 分析対象の都市を選択
+    selected_city = st.selectbox("シミュレーション対象の都市を選択", df['地域名'])
+    city_data = df[df['地域名'] == selected_city].iloc[0]
+    current_salt = city_data['平均食塩摂取量_g']
+    
+    st.markdown(f"**【{selected_city}の現状】** 平均食塩摂取量: `{current_salt}g` / 健康寿命: `{city_data['健康寿命_年']}年`")
+    
+    # スライダーで目標値を設定
+    target_salt = st.slider(
+        "🎯 政策による目標摂取量 (g/日)", 
+        min_value=5.0, 
+        max_value=float(current_salt), 
+        value=float(current_salt), 
+        step=0.1,
+        help="市民への減塩啓発や給食の改善などにより、摂取量をどこまで減らせるかを設定します。"
+    )
+    
+    # 削減量
+    reduction = current_salt - target_salt
+    
+    # === 統計モデル（仮）に基づく効果算出 ===
+    # ※塩分1g低下につき、健康寿命0.6年延伸、循環器リスク8%低下、医療費4%削減と仮定
+    gained_life = round(reduction * 0.6, 2)
+    reduced_risk = round(reduction * 8, 1)
+    saved_cost = round(city_data['年間医療介護費_億円'] * (reduction * 0.04), 0)
+    
+    st.write("### 期待される政策効果（推計）")
+    
+    if reduction > 0:
+        col1, col2, col3 = st.columns(3)
+        col1.metric("🌱 健康寿命の延伸", f"+ {gained_life} 年", f"予測: {round(city_data['健康寿命_年'] + gained_life, 2)}年")
+        col2.metric("❤️ 循環器疾患死亡リスクの低下", f"- {reduced_risk} %", delta_color="inverse")
+        col3.metric("💰 年間医療・介護費の削減", f"- {int(saved_cost)} 億円", delta_color="inverse")
+        
+        # 削減効果を棒グラフで比較
+        fig_bar = go.Figure(data=[
+            go.Bar(name='介入前 (現状)', x=['健康寿命(年)', '年間医療費(億円)'], y=[city_data['健康寿命_年'], city_data['年間医療介護費_億円']], marker_color='#EF553B'),
+            go.Bar(name='介入後 (目標達成時)', x=['健康寿命(年)', '年間医療費(億円)'], y=[city_data['健康寿命_年'] + gained_life, city_data['年間医療介護費_億円'] - saved_cost], marker_color='#00CC96')
+        ])
+        fig_bar.update_layout(barmode='group', title="現状と介入後の比較", height=400)
+        st.plotly_chart(fig_bar, use_container_width=True)
+        
+    else:
+        st.info("👈 スライダーを左に動かして、減塩目標を設定してください。")
 
-    # オプション: 政令市のみに絞るかどうかのチェックボックス
-    is_seirei_only = st.checkbox("🏙️ 政令指定都市（20都市）のデータのみに絞り込む", value=True)
-
-    if st.button("🚀 データを取得して表を作成", type="primary"):
-        with st.spinner(f"データ取得・成形中... (ID: {selected_id})"):
-            df = fetch_and_format_estat(selected_id)
-            
-            if df is not None:
-                if is_seirei_only:
-                    # 政令指定都市フィルタ
-                    seirei_cities = ["札幌市", "仙台市", "さいたま市", "千葉市", "横浜市", "川崎市",
-                                     "相模原市", "新潟市", "静岡市", "浜松市", "名古屋市", "京都市",
-                                     "大阪市", "堺市", "神戸市", "岡山市", "広島市", "北九州市", "福岡市", "熊本市"]
-                    area_col = next((col for col in df.columns if any(x in col for x in ["地域", "都道府県", "市区町村", "市町村"])), None)
-                    if area_col:
-                        pattern = '|'.join(seirei_cities)
-                        df = df[df[area_col].str.contains(pattern, na=False, regex=True)]
-                        st.info("政令指定都市のデータに絞り込みました。")
-                    else:
-                        st.warning("地域を示す列が見つからなかったため、絞り込みをスキップしました。")
-
-                st.success("統計表の作成が完了しました！")
-                
-                # 表の表示
-                st.dataframe(df, use_container_width=True)
-                
-                # CSVダウンロードボタン
-                csv = df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
-                st.download_button(
-                    label="📥 CSVファイルをダウンロード",
-                    data=csv,
-                    file_name=f"estat_data_{selected_id}.csv",
-                    mime="text/csv",
-                )
+# ------------------------------------------
+# タブ3: データテーブル
+# ------------------------------------------
+with tab3:
+    st.subheader("基礎データ")
+    st.dataframe(df.style.background_gradient(cmap='Reds', subset=['平均食塩摂取量_g', '循環器疾患死亡率_10万対']), use_container_width=True)
+    
+    # CSVダウンロード
+    csv = df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
+    st.download_button("📥 基礎データをCSVでダウンロード", data=csv, file_name="salt_reduction_data.csv", mime="text/csv")
