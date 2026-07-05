@@ -12,8 +12,22 @@ st.set_page_config(page_title="e-Stat データ結合・分析ダッシュボー
 APP_ID = st.secrets.get("ESTAT_APP_ID", "")
 
 # ==========================================
-# API取得処理
+# API取得＆検索処理
 # ==========================================
+@st.cache_data(ttl=3600)
+def search_estat_id(keyword):
+    """新機能：キーワードから統計表IDを検索する"""
+    if not APP_ID: return []
+    url = "http://api.e-stat.go.jp/rest/3.0/app/json/getStatsList"
+    params = {"appId": APP_ID, "searchWord": keyword, "limit": 30}
+    try:
+        response = requests.get(url, params=params).json()
+        datalist = response.get('GET_STATS_LIST', {}).get('DATALIST_INF', {}).get('TABLE_INF', [])
+        if isinstance(datalist, dict): datalist = [datalist]
+        return datalist
+    except Exception:
+        return []
+
 @st.cache_data(ttl=3600)
 def fetch_and_format_estat(stats_data_id):
     if not APP_ID: return None, "APIキーが設定されていません。"
@@ -53,11 +67,11 @@ def fetch_and_format_estat(stats_data_id):
 # ==========================================
 def load_demo_data():
     return pd.DataFrame({
-        '地域名': ['札幌市', '仙台市', 'さいたま市', '千葉市', '横浜市', '川崎市', '名古屋市', '京都市', '大阪市', '堺市', '神戸市', '広島市', '福岡市', '北九州市'],
-        '平均食塩摂取量_g': [10.5, 10.8, 9.6, 9.7, 9.3, 9.4, 9.8, 9.2, 9.7, 9.9, 9.4, 10.1, 9.6, 10.3],
-        '健康寿命_年': [71.5, 71.2, 72.5, 72.4, 73.1, 72.8, 72.0, 73.2, 72.2, 71.8, 72.9, 71.6, 72.4, 71.4],
-        '循環器疾患死亡率_10万対': [85.2, 88.1, 68.5, 69.2, 62.5, 64.1, 73.2, 61.8, 74.5, 76.0, 63.2, 81.0, 69.1, 84.5],
-        '年間医療介護費_億円': [450, 380, 410, 390, 850, 420, 780, 460, 920, 280, 440, 390, 520, 350]
+        '地域名': ['札幌市', '仙台市', 'さいたま市', '千葉市', '横浜市', '川崎市', '相模原市', '新潟市', '静岡市', '浜松市', '名古屋市', '京都市', '大阪市', '堺市', '神戸市', '岡山市', '広島市', '北九州市', '福岡市', '熊本市'],
+        '平均食塩摂取量_g': [10.5, 10.8, 9.6, 9.7, 9.3, 9.4, 9.5, 11.2, 9.8, 9.9, 9.8, 9.2, 9.7, 9.9, 9.4, 10.0, 10.1, 10.3, 9.6, 10.2],
+        '健康寿命_年': [71.5, 71.2, 72.5, 72.4, 73.1, 72.8, 72.6, 71.0, 72.9, 73.0, 72.0, 73.2, 72.2, 71.8, 72.9, 72.1, 71.6, 71.4, 72.4, 72.0],
+        '循環器疾患死亡率_10万対': [85.2, 88.1, 68.5, 69.2, 62.5, 64.1, 65.0, 92.5, 66.8, 67.2, 73.2, 61.8, 74.5, 76.0, 63.2, 70.1, 81.0, 84.5, 69.1, 78.5],
+        '年間医療介護費_億円': [450, 380, 410, 390, 850, 420, 250, 320, 290, 280, 780, 460, 920, 280, 440, 270, 390, 350, 520, 260]
     })
 
 def load_age_demo_data():
@@ -69,73 +83,100 @@ def load_age_demo_data():
         '実績値_女': [4.5, 7.5, 8.8, 8.9, 9.2, 9.4, 9.8, 9.6, 9.0]
     })
 
-# Session Stateによるデータの永続化
 if "main_df" not in st.session_state:
     st.session_state["main_df"] = load_demo_data()
 
 df_age = load_age_demo_data()
 
 # ==========================================
-# サイドバー: 拡張マッシュアップ・エンジン
+# サイドバー: 検索 ＆ 拡張エンジン
 # ==========================================
 with st.sidebar:
-    st.header("⚙️ データ合体エンジン")
-    st.markdown("e-Statから取得したデータをダッシュボードに追加します。")
+    st.header("🔍 1. 統計表IDを探す")
+    st.markdown("キーワードでe-Stat内を検索します。")
     
-    target_stats_id = st.text_input("統計表ID (10桁)", value="0003411646") 
+    search_kw = st.text_input("キーワード (例: 医療施設調査 病床)")
+    if st.button("IDを検索", use_container_width=True):
+        if search_kw:
+            with st.spinner("検索中..."):
+                results = search_estat_id(search_kw)
+                if results:
+                    st.session_state["search_results"] = results
+                else:
+                    st.warning("見つかりませんでした。別のキーワードをお試しください。")
+    
+    selected_id = ""
+    if "search_results" in st.session_state:
+        opts = {}
+        for r in st.session_state["search_results"]:
+            title = r.get('STAT_NAME', {}).get('$', '') + " - " + r.get('TITLE', {}).get('$', '')
+            opts[f"[{r['@id']}] {title}"] = r['@id']
+        
+        selected_opt = st.selectbox("検索結果から選択:", list(opts.keys()))
+        selected_id = opts[selected_opt]
+    
+    st.divider()
+
+    st.header("⚙️ 2. データ合体エンジン")
+    target_stats_id = st.text_input("取得する統計表ID", value=selected_id, placeholder="10桁の数字を入力") 
     
     if st.button("🔄 e-Statから取得", type="primary", use_container_width=True):
-        with st.spinner("APIと通信中..."):
-            fetched_df, msg = fetch_and_format_estat(target_stats_id)
-            if fetched_df is not None:
-                st.session_state["api_data"] = fetched_df
-                st.success("✅ データ取得成功！")
-            else:
-                st.error(f"❌ エラー: {msg}")
+        if target_stats_id:
+            with st.spinner("APIと通信中..."):
+                fetched_df, msg = fetch_and_format_estat(target_stats_id)
+                if fetched_df is not None:
+                    st.session_state["api_data"] = fetched_df
+                    st.success("✅ データ取得成功！下にスクロールしてください。")
+                else:
+                    st.error(f"❌ エラー: {msg}")
                 
-    # 取得したデータをメインの表に合体させるUI
     if "api_data" in st.session_state:
         api_df = st.session_state["api_data"]
         
-        with st.expander("1. 取得したデータの中身を確認", expanded=True):
-            st.dataframe(api_df.head(5))
+        with st.expander("取得したデータの中身を確認", expanded=True):
+            st.dataframe(api_df.head(15))
             
-        st.markdown("#### 🔗 2. ダッシュボードへ結合 (Merge)")
-        st.caption("取得したデータから必要な列を選び、メインデータに合体させます。")
+        st.markdown("#### 🔗 3. ダッシュボードへ結合")
         
-        # 地域名と推測される列を自動選択
         guess_area = next((col for col in api_df.columns if "地域" in col or "市区町村" in col), api_df.columns[0])
         col_area = st.selectbox("A.「地域名」が含まれる列:", api_df.columns, index=list(api_df.columns).index(guess_area))
         
-        # 値の列
         guess_val = "値" if "値" in api_df.columns else api_df.columns[-1]
         col_val = st.selectbox("B. 追加したい「数値」の列:", api_df.columns, index=list(api_df.columns).index(guess_val))
         
-        new_name = st.text_input("C. グラフ上での表示名:", value="新規APIデータ")
+        new_name = st.text_input("C. グラフ上での表示名:", value="新規追加データ")
         
-        if st.button("✨ ダッシュボードに結合する"):
-            try:
-                # 必要な列だけ抽出してリネーム
-                temp_df = api_df[[col_area, col_val]].copy()
-                temp_df = temp_df.rename(columns={col_area: '地域名', col_val: new_name})
-                
-                # 重複排除と数値変換
-                temp_df = temp_df.drop_duplicates(subset=['地域名'])
-                temp_df[new_name] = temp_df[new_name].astype(str).str.replace(',', '') # カンマ除去
-                temp_df[new_name] = pd.to_numeric(temp_df[new_name], errors='coerce')
-                
-                # Pandasの強力な Merge (結合) 機能
-                st.session_state["main_df"] = pd.merge(st.session_state["main_df"], temp_df, on='地域名', how='left')
-                
-                st.success(f"「{new_name}」を追加しました！グラフを確認してください。")
-            except Exception as e:
-                st.error(f"結合エラーが発生しました: {e}")
+        if col_area == col_val:
+            st.warning("⚠️ 地域列と数値列に同じものが選ばれています。別々の列を選択してください。")
+        else:
+            if st.button("✨ ダッシュボードに結合する", use_container_width=True):
+                try:
+                    # エラー対策：renameではなく、安全に列名を直接上書きする
+                    temp_df = api_df[[col_area, col_val]].copy()
+                    temp_df.columns = ['地域名', new_name]
+                    
+                    # 空白行や重複を安全に排除
+                    temp_df = temp_df.dropna(subset=['地域名'])
+                    temp_df = temp_df.drop_duplicates(subset=['地域名'])
+                    
+                    temp_df[new_name] = temp_df[new_name].astype(str).str.replace(',', '')
+                    temp_df[new_name] = pd.to_numeric(temp_df[new_name], errors='coerce')
+                    
+                    # もし既存の列名と同名の場合は、古いものを消して上書きする
+                    if new_name in st.session_state["main_df"].columns:
+                        st.session_state["main_df"] = st.session_state["main_df"].drop(columns=[new_name])
+                    
+                    st.session_state["main_df"] = pd.merge(st.session_state["main_df"], temp_df, on='地域名', how='left')
+                    
+                    st.success(f"「{new_name}」を追加しました！")
+                except Exception as e:
+                    st.error(f"結合エラーが発生しました。データ形式を確認してください: {e}")
 
 # ==========================================
 # アプリのメインUI (フロントエンド)
 # ==========================================
 st.title("📈 超・拡張型 データ分析ダッシュボード")
-st.markdown("サイドバーからe-Statのデータを結合することで、分析の次元を無限に拡張できます。")
+st.markdown("サイドバーでe-Stat内を検索し、データを結合することで、分析の次元を無限に拡張できます。")
 
 tab1, tab2, tab3, tab4 = st.tabs([
     "📊 多次元・相関分析マップ", 
@@ -144,17 +185,12 @@ tab1, tab2, tab3, tab4 = st.tabs([
     "📋 現在のデータテーブル"
 ])
 
-# 現在の最新データを取得
 current_df = st.session_state["main_df"]
 
-# ------------------------------------------
-# タブ1: 現状分析 (ユーザーが軸を自由に変更可能に進化！)
-# ------------------------------------------
 with tab1:
     st.subheader("相関分析マップ")
     st.info("💡 グラフのX軸、Y軸、円の大きさを自由に変更して、未知の相関関係を探し出せます。")
     
-    # 結合されたデータの中から「数値」の列だけを抽出
     num_cols = current_df.select_dtypes(include=['float64', 'int64']).columns.tolist()
     
     col_x, col_y, col_s = st.columns(3)
@@ -162,7 +198,6 @@ with tab1:
     with col_y: y_axis = st.selectbox("Y軸 (結果):", num_cols, index=1 if len(num_cols)>1 else 0)
     with col_s: size_axis = st.selectbox("円の大きさ:", num_cols, index=2 if len(num_cols)>2 else 0)
 
-    # 動的に描画される散布図
     fig_scatter = px.scatter(
         current_df, x=x_axis, y=y_axis, text="地域名", 
         size=size_axis, color=size_axis,
@@ -172,9 +207,6 @@ with tab1:
     fig_scatter.update_traces(textposition='top center', marker=dict(opacity=0.8, line=dict(width=1, color='DarkSlateGrey')))
     st.plotly_chart(fig_scatter, use_container_width=True)
 
-# ------------------------------------------
-# タブ2: シミュレーター (変更なし)
-# ------------------------------------------
 with tab2:
     st.subheader("行政介入による減塩効果シミュレーション")
     col_left, col_right = st.columns([1, 2])
@@ -209,9 +241,6 @@ with tab2:
         else:
             st.info("👈 左側のスライダーを動かして目標を設定してください。")
 
-# ------------------------------------------
-# タブ3: 年齢別・ライフコース分析 (変更なし)
-# ------------------------------------------
 with tab3:
     st.subheader("年齢階級別の食塩摂取状況（隠れた危機の可視化）")
     gender = st.radio("表示する性別を選択:", ["男性", "女性"], horizontal=True)
@@ -222,12 +251,8 @@ with tab3:
     fig_age.update_layout(title=f"【{gender}】 年齢階級別の目標値と実績値のギャップ", xaxis_title="年齢階級", yaxis_title="1日あたり食塩摂取量 (g)", hovermode="x unified", height=500)
     st.plotly_chart(fig_age, use_container_width=True)
 
-# ------------------------------------------
-# タブ4: データテーブル
-# ------------------------------------------
 with tab4:
     st.subheader("現在のベースデータ（結合結果）")
-    st.markdown("サイドバーでデータを結合すると、ここの列がどんどん増えていきます。")
     
     col_config = {}
     if "平均食塩摂取量_g" in current_df.columns:
