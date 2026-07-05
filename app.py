@@ -15,7 +15,6 @@ APP_ID = st.secrets.get("ESTAT_APP_ID", "")
 # ==========================================
 @st.cache_data(ttl=3600)
 def search_estat_id(keyword):
-    """キーワードから統計表IDを検索する"""
     if not APP_ID: return []
     url = "http://api.e-stat.go.jp/rest/3.0/app/json/getStatsList"
     params = {"appId": APP_ID, "searchWord": keyword, "limit": 30}
@@ -27,9 +26,7 @@ def search_estat_id(keyword):
     except Exception:
         return []
 
-# ⚠️ キャッシュによる古いデータの残留を防ぐため、あえて cache_data を外して常に最新を取得・翻訳させます
 def fetch_and_format_estat(stats_data_id):
-    """データを取得し、確実に人間が読める形にパースする"""
     if not APP_ID: return None, "APIキーが設定されていません。"
     url = "http://api.e-stat.go.jp/rest/3.0/app/json/getStatsData"
     params = {"appId": APP_ID, "statsDataId": stats_data_id, "metaGetFlg": "Y"}
@@ -38,7 +35,6 @@ def fetch_and_format_estat(stats_data_id):
         if response['GET_STATS_DATA']['RESULT']['STATUS'] != 0:
             return None, response['GET_STATS_DATA']['RESULT']['ERROR_MSG']
 
-        # e-Stat特有の「要素が1つだと辞書になる」問題を回避
         class_obj_raw = response['GET_STATS_DATA']['STATISTICAL_DATA']['CLASS_INF']['CLASS_OBJ']
         class_obj = [class_obj_raw] if isinstance(class_obj_raw, dict) else class_obj_raw
         
@@ -61,16 +57,14 @@ def fetch_and_format_estat(stats_data_id):
                 if key.startswith('@') and key not in ['@unit', '@tab']:
                     cat_id = key[1:]
                     if cat_id in meta_dict:
-                        col_name = meta_dict[cat_id]['name']
-                        val_name = meta_dict[cat_id]['codes'].get(code, code)
-                        row[col_name] = val_name
+                        row[meta_dict[cat_id]['name']] = meta_dict[cat_id]['codes'].get(code, code)
             parsed_data.append(row)
         return pd.DataFrame(parsed_data), "Success"
     except Exception as e:
         return None, f"エラー: {str(e)}"
 
 # ==========================================
-# 初期ベースデータ（日本全国の都道府県・政令市リスト）
+# 初期ベースデータ（器の作成）
 # ==========================================
 def load_base_data():
     areas = [
@@ -94,9 +88,9 @@ if "main_df" not in st.session_state:
 # サイドバー: 検索 ＆ 拡張エンジン
 # ==========================================
 with st.sidebar:
-    st.header("🔍 1. 統計表IDを探す")
+    st.header("🔍 1. データを探す")
     
-    search_kw = st.text_input("キーワード検索", placeholder="例: 医療施設調査 病床")
+    search_kw = st.text_input("キーワード検索", placeholder="例: 医療施設調査")
     if st.button("IDを検索", use_container_width=True):
         if search_kw:
             with st.spinner("検索中..."):
@@ -121,114 +115,138 @@ with st.sidebar:
     st.header("⚙️ 2. データを取得・合体")
     target_stats_id = st.text_input("取得する統計表ID", value=selected_id, placeholder="10桁の数字を入力") 
     
-    if st.button("🔄 e-Statから最新データを取得", type="primary", use_container_width=True):
+    if st.button("🔄 e-Statから取得する", type="primary", use_container_width=True):
         if target_stats_id:
             with st.spinner("APIからデータを翻訳中..."):
                 fetched_df, msg = fetch_and_format_estat(target_stats_id)
                 if fetched_df is not None:
                     st.session_state["api_data"] = fetched_df
-                    st.success("✅ データ翻訳成功！下にスクロールしてください。")
+                    st.success("✅ データ取得成功！下にスクロールしてください。")
                 else:
                     st.error(f"❌ エラー: {msg}")
                 
     if "api_data" in st.session_state:
-        api_df = st.session_state["api_data"]
+        api_df = st.session_state["api_data"].copy()
         
-        st.markdown("#### 🔗 3. データの絞り込みと結合")
-        st.caption("e-Statのデータは様々な条件が混ざっています。必要な条件（総数など）に絞り込んでから結合してください。")
+        st.markdown("#### 🔗 3. ダッシュボードへ結合")
         
-        # 絞り込み（フィルター）UIの自動生成
-        cat_cols = [col for col in api_df.columns if col != '値' and not any(x in col for x in ['地域', '都道府県', '市区町村'])]
+        # --- 自動フィルタリング（初心者向けに複雑な設定を隠す） ---
+        cat_cols = [col for col in api_df.columns if col != '値' and not any(x in col for x in ['地域', '都道府県', '市区町村', '時間軸'])]
         filter_dict = {}
-        for col in cat_cols:
-            unique_vals = api_df[col].unique().tolist()
-            default_idx = 0
-            # 「総数」や「計」がつけば自動的にデフォルト選択する
-            for i, v in enumerate(unique_vals):
-                if "総数" in str(v) or "計" in str(v):
-                    default_idx = i
-                    break
-            filter_dict[col] = st.selectbox(f"[{col}] の条件:", unique_vals, index=default_idx)
+        
+        with st.expander("🛠️ 絞り込み条件（※自動で総数が選ばれています）", expanded=False):
+            st.caption("特定の年齢や種類に絞りたい場合は変更してください。")
+            for col in cat_cols:
+                unique_vals = api_df[col].dropna().unique().tolist()
+                default_idx = 0
+                # 「総数」や「計」がつけば自動的にデフォルト選択
+                for i, v in enumerate(unique_vals):
+                    if any(keyword in str(v) for keyword in ["総数", "計", "全"]):
+                        default_idx = i
+                        break
+                filter_dict[col] = st.selectbox(f"{col}:", unique_vals, index=default_idx)
         
         # フィルター実行
-        filtered_df = api_df.copy()
         for col, val in filter_dict.items():
-            filtered_df = filtered_df[filtered_df[col] == val]
-            
-        st.info(f"💡 絞り込み後: 残り {len(filtered_df)} 件のデータ")
+            api_df = api_df[api_df[col] == val]
         
-        # 結合設定
-        guess_area = next((col for col in filtered_df.columns if any(x in col for x in ["地域", "都道府県", "市区町村"])), filtered_df.columns[0])
-        col_area = st.selectbox("A.「地域名」の列:", filtered_df.columns, index=list(filtered_df.columns).index(guess_area))
+        st.caption(f"抽出されたデータ: {len(api_df)} 件")
         
-        new_name = st.text_input("B. グラフ上での表示名:", value="新規追加データ")
+        # --- 結合設定 ---
+        guess_area = next((col for col in api_df.columns if any(x in col for x in ["地域", "都道府県", "市区町村"])), api_df.columns[0])
+        col_area = st.selectbox("A.「地域名」の列:", api_df.columns, index=list(api_df.columns).index(guess_area))
+        
+        guess_val = "値" if "値" in api_df.columns else api_df.columns[-1]
+        col_val = st.selectbox("B. 追加したい「数値」の列:", api_df.columns, index=list(api_df.columns).index(guess_val))
+        
+        new_name = st.text_input("C. グラフ上での表示名:", value="新規追加データ")
         
         if st.button("✨ ダッシュボードに結合する", use_container_width=True):
-            try:
-                temp_df = filtered_df[[col_area, '値']].copy()
-                temp_df.columns = ['地域名', new_name]
-                
-                # 空白行や重複を排除
-                temp_df = temp_df.dropna(subset=['地域名'])
-                temp_df = temp_df.drop_duplicates(subset=['地域名'])
-                
-                temp_df[new_name] = temp_df[new_name].astype(str).str.replace(',', '').replace(['-', '***', 'X', 'x'], pd.NA)
-                temp_df[new_name] = pd.to_numeric(temp_df[new_name], errors='coerce')
-                
-                if new_name in st.session_state["main_df"].columns:
-                    st.session_state["main_df"] = st.session_state["main_df"].drop(columns=[new_name])
-                
-                st.session_state["main_df"] = pd.merge(st.session_state["main_df"], temp_df, on='地域名', how='left')
-                st.success(f"「{new_name}」を追加しました！")
-            except Exception as e:
-                st.error(f"結合エラーが発生しました: {e}")
+            if col_area == col_val:
+                st.warning("⚠️ 地域列と数値列に同じものが選ばれています。")
+            else:
+                try:
+                    temp_df = api_df[[col_area, col_val]].copy()
+                    temp_df.columns = ['地域名', new_name]
                     
-        if st.button("🗑️ ベースデータを初期化", use_container_width=True):
+                    # 空白行や重複を安全に排除
+                    temp_df = temp_df.dropna(subset=['地域名'])
+                    temp_df = temp_df.drop_duplicates(subset=['地域名'])
+                    
+                    # 数値以外のゴミ（カンマ、ハイフン、Xなど）を徹底的に消去して数値化
+                    temp_df[new_name] = temp_df[new_name].astype(str).str.replace(',', '').str.replace('，', '')
+                    temp_df[new_name] = temp_df[new_name].replace(['-', '***', 'X', 'x', ''], pd.NA)
+                    temp_df[new_name] = pd.to_numeric(temp_df[new_name], errors='coerce')
+                    
+                    if new_name in st.session_state["main_df"].columns:
+                        st.session_state["main_df"] = st.session_state["main_df"].drop(columns=[new_name])
+                    
+                    st.session_state["main_df"] = pd.merge(st.session_state["main_df"], temp_df, on='地域名', how='left')
+                    st.success(f"「{new_name}」を追加しました！")
+                except Exception as e:
+                    st.error(f"結合エラーが発生しました: {e}")
+                    
+        st.write("")
+        if st.button("🗑️ ベースデータを初期化 (最初からやり直す)", use_container_width=True):
             st.session_state["main_df"] = load_base_data()
+            if "api_data" in st.session_state:
+                del st.session_state["api_data"]
             st.rerun()
 
 # ==========================================
 # アプリのメインUI (フロントエンド)
 # ==========================================
 st.title("🌐 e-Stat 汎用データ分析・BIダッシュボード")
-st.markdown("サイドバーでe-Stat内を検索し、データを次々と結合していくことで、あなただけの分析ダッシュボードを作ることができます。")
-
-tab1, tab2, tab3 = st.tabs([
-    "📊 多次元・相関分析マップ", 
-    "📈 ランキング・比較グラフ", 
-    "📋 結合済みデータテーブル"
-])
 
 current_df = st.session_state["main_df"]
 num_cols = current_df.select_dtypes(include=['float64', 'int64']).columns.tolist()
 
-with tab1:
-    st.subheader("相関分析マップ (散布図)")
-    if len(num_cols) < 2:
-        st.info("👈 サイドバーから、比較したい「数値データ」を2つ以上結合してください。")
-    else:
-        col_x, col_y, col_s = st.columns(3)
-        with col_x: x_axis = st.selectbox("X軸 (原因/要因):", num_cols, index=0)
-        with col_y: y_axis = st.selectbox("Y軸 (結果):", num_cols, index=1)
-        with col_s: size_axis = st.selectbox("円の大きさ (オプション):", ["なし"] + num_cols, index=0)
+# データがまだ1つも結合されていない場合は、チュートリアルを表示
+if len(num_cols) == 0:
+    st.info("👋 ようこそ！まずは左のサイドバーからデータを追加してください。")
+    st.markdown("""
+    ### 🔰 使い方の 3 STEP
+    
+    1. **データを検索する**
+       > 左上の検索窓に `医療施設調査` や `国勢調査` などと入力して「IDを検索」を押します。
+       > （※試しに **`0003411634`** (病院数) などの数値を直接下のID欄に入力してもOKです）
+       
+    2. **データを取得する**
+       > 「🔄 e-Statから取得する」ボタンを押すと、国からデータが読み込まれます。
+       
+    3. **ダッシュボードに結合する**
+       > 取得ができたら、表示名（例：`病院数`）を入力して **「✨ ダッシュボードに結合する」** を押してください。
+       > この画面がグラフに切り替わります！
+    """)
 
-        plot_df = current_df.dropna(subset=[x_axis, y_axis])
-        
-        if size_axis == "なし":
-            fig_scatter = px.scatter(plot_df, x=x_axis, y=y_axis, text="地域名", height=600)
+else:
+    # データが結合されたらグラフを表示
+    tab1, tab2, tab3 = st.tabs(["📊 散布図 (相関分析)", "📈 棒グラフ (ランキング)", "📋 結合済みデータテーブル"])
+
+    with tab1:
+        st.subheader("相関分析マップ")
+        if len(num_cols) < 2:
+            st.warning("⚠️ 散布図を作るには、サイドバーからもう1つ別のデータを検索して結合してください。（例: 人口、所得など）")
         else:
-            plot_df = plot_df.dropna(subset=[size_axis])
-            plot_df['size_abs'] = plot_df[size_axis].fillna(0).abs() 
-            fig_scatter = px.scatter(plot_df, x=x_axis, y=y_axis, text="地域名", size='size_abs', color=size_axis, color_continuous_scale="Viridis", height=600)
-            
-        fig_scatter.update_traces(textposition='top center', marker=dict(opacity=0.8, line=dict(width=1, color='DarkSlateGrey')))
-        st.plotly_chart(fig_scatter, use_container_width=True)
+            col_x, col_y, col_s = st.columns(3)
+            with col_x: x_axis = st.selectbox("X軸 (原因/要因):", num_cols, index=0)
+            with col_y: y_axis = st.selectbox("Y軸 (結果):", num_cols, index=1)
+            with col_s: size_axis = st.selectbox("円の大きさ (オプション):", ["なし"] + num_cols, index=0)
 
-with tab2:
-    st.subheader("ランキング比較 (棒グラフ)")
-    if len(num_cols) == 0:
-        st.info("👈 サイドバーから、比較したい「数値データ」を結合してください。")
-    else:
+            plot_df = current_df.dropna(subset=[x_axis, y_axis])
+            
+            if size_axis == "なし":
+                fig_scatter = px.scatter(plot_df, x=x_axis, y=y_axis, text="地域名", height=600)
+            else:
+                plot_df = plot_df.dropna(subset=[size_axis])
+                plot_df['size_abs'] = plot_df[size_axis].fillna(0).abs() 
+                fig_scatter = px.scatter(plot_df, x=x_axis, y=y_axis, text="地域名", size='size_abs', color=size_axis, color_continuous_scale="Viridis", height=600)
+                
+            fig_scatter.update_traces(textposition='top center', marker=dict(opacity=0.8, line=dict(width=1, color='DarkSlateGrey')))
+            st.plotly_chart(fig_scatter, use_container_width=True)
+
+    with tab2:
+        st.subheader("ランキング比較")
         c1, c2, c3 = st.columns(3)
         with c1: bar_col = st.selectbox("比較する指標:", num_cols)
         with c2: sort_order = st.radio("並び順:", ["大きい順", "小さい順"], horizontal=True)
@@ -243,12 +261,8 @@ with tab2:
         fig_bar = px.bar(plot_bar_df, x="地域名", y=bar_col, color=bar_col, color_continuous_scale="Blues", height=500)
         st.plotly_chart(fig_bar, use_container_width=True)
 
-with tab3:
-    st.subheader("結合済みデータテーブル")
-    if len(num_cols) == 0:
-        st.write("現在、地域名のリストのみ保持しています。サイドバーからデータを結合してください。")
-        st.dataframe(current_df, use_container_width=True)
-    else:
+    with tab3:
+        st.subheader("結合済みデータテーブル")
         st.markdown("結合されたデータセットです。列名をクリックするとソートできます。")
         st.dataframe(current_df, use_container_width=True)
         csv = current_df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
