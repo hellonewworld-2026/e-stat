@@ -116,7 +116,27 @@ with tab2:
 # ------------------------------------------
 with tab3:
     st.subheader("基礎データ")
-    st.dataframe(df.style.background_gradient(cmap='Reds', subset=['平均食塩摂取量_g', '循環器疾患死亡率_10万対']), use_container_width=True)
+    
+    # エラーの原因であった matplotlib 依存の style.background_gradient を削除し、
+    # 代わりに Streamlit の標準機能である ProgressColumn を使って軽量に視覚化します
+    st.dataframe(
+        df,
+        use_container_width=True,
+        column_config={
+            "平均食塩摂取量_g": st.column_config.ProgressColumn(
+                "平均食塩摂取量_g",
+                format="%.1f",
+                min_value=5.0,
+                max_value=12.0,
+            ),
+            "循環器疾患死亡率_10万対": st.column_config.ProgressColumn(
+                "循環器疾患死亡率_10万対",
+                format="%.1f",
+                min_value=0.0,
+                max_value=100.0,
+            )
+        }
+    )
     
     # CSVダウンロード
     csv = df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
